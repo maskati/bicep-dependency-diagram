@@ -1,0 +1,27 @@
+name: Test Bicep Dependency Diagram
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Run action without parameters
+        id: bicep-dependency-diagram
+        uses: ./
+      - name: Run action with parameters
+        uses: ./
+        with:
+          working-directory: test
+          recurse: false
+          build-method: cli
+          job-summary: false
+      - name: Show result and save to file
+        env:
+          DIAGRAM: ${{ steps.bicep-dependency-diagram.outputs.diagram }}
+        run: echo "$DIAGRAM" | tee bicep-dependency-diagram.md
+      - name: Upload diagram as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bicep-dependency-diagram
+          path: bicep-dependency-diagram.md

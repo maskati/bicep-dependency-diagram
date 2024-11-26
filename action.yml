@@ -1,0 +1,79 @@
+name: 'Bicep Dependency Diagram'
+description: 'Generate a diagram of Bicep module dependencies in Mermaid flowchart syntax'
+inputs:
+  build-method:
+    description: 'Whether to build using Bicep PowerShell module (powershell) or Bicep CLI (cli).'
+    required: false
+    default: 'powershell'
+  working-directory:
+    description: 'Directory from which to generate the diagram. If not provided runs from `GITHUB_WORKSPACE` which is typically the repository checkout root.'
+    required: false
+    default: '.'
+  recurse:
+    description: 'Whether to generate diagram from bicep files found recursively (true) or only the current directory (false).'
+    required: false
+    default: 'true'
+  job-summary:
+    description: 'Whether to output the diagram to the GitHub job summary (true) or only as the action diagram output (false).'
+    required: false
+    default: 'true'
+outputs:
+  diagram:
+    description: "Mermaid flowchart diagram of bicep dependencies"
+    value: ${{ steps.generate-diagram.outputs.diagram }}
+runs:
+  using: "composite"
+  steps:
+    - name: Install Bicep PowerShell module
+      if: inputs.build-method == 'powershell'
+      shell: pwsh
+      run: |
+        # https://www.powershellgallery.com/packages/Bicep
+        set-psrepository -name psgallery -installationpolicy trusted
+        install-module -name bicep
+    - name: Generate diagram
+      id: generate-diagram
+      shell: pwsh
+      working-directory: ${{ inputs.working-directory || '.' }}
+      run: |
+        gci ${{ inputs.recurse == 'true' && '-r ' || '' }}-file *.bicep|%{$templates=@()}{
+          write-host "Building $($_.fullname|resolve-path -relative)"
+          $template=$(${{ inputs.build-method == 'powershell' && 'build-bicep -path $_.fullname -asstring -warningaction silentlycontinue' || 'az bicep build --file "$($_.fullname)" --stdout --only-show-errors' }})|convertfrom-json
+          $templates+=[pscustomobject]@{
+            file=$_.fullname|resolve-path -relative
+            hash=$template.metadata._generator.templatehash
+            childhashes=$template.resources.psobject.properties.value.properties.template.metadata._generator.templatehash|sort-object -unique
+          }
+        }
+        $templates|%{
+          $childtemplates=$_.childhashes|%{$childhash=$_;$templates|?{$_.hash -eq $childhash}}
+          $_|add-member -membertype noteproperty -name childtemplates -value $childtemplates
+          $templatehash=$_.hash
+          $files=$templates|?{$_.hash -eq $templatehash}|select -exp file
+          $_|add-member -membertype noteproperty -name files -value $files
+        }
+        $diagram=$templates|%{'graph LR'}{
+          $template=$_
+          $lhs=($template.files|%{[web.httputility]::htmlencode($_)}) -join '<br/>'
+          if($_.childtemplates.count){
+            $_.childtemplates|%{
+              $rhs=($_.files|%{[web.httputility]::htmlencode($_)}) -join '<br/>'
+              "  $($template.hash)(`"$lhs`") --> $($_.hash)(`"$rhs`")"
+            }
+          }else{
+            "  $($template.hash)(`"$lhs`")"
+          }
+        }
+        $eof=(new-guid).guid
+        "diagram<<$eof" >> $env:GITHUB_OUTPUT
+        $diagram|tee-object -append $env:GITHUB_OUTPUT
+        "$eof" >> $env:GITHUB_OUTPUT
+    - name: Output diagram to job summary
+      if: inputs.job-summary == 'true'
+      shell: pwsh
+      env:
+        DIAGRAM: ${{ steps.generate-diagram.outputs.diagram }}
+      run: |
+        '```mermaid' >> $env:GITHUB_STEP_SUMMARY
+        "$env:DIAGRAM" >> $env:GITHUB_STEP_SUMMARY
+        '```' >> $env:GITHUB_STEP_SUMMARY
